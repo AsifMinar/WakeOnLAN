@@ -1,11 +1,18 @@
 #include <iostream>     // For input/output
 #include <string>       // For handling strings
 #include <vector>       // For storing bytes
-#include <sys/socket.h> // For network sockets
-#include <netinet/in.h> // For internet address structures
-#include <arpa/inet.h>  // For converting IP addresses
-#include <unistd.h>     // For close()
 #include <cstring>      // For memset()
+
+#ifdef _WIN32
+#include <winsock2.h>   // For Windows socket programming
+#include <ws2tcpip.h>   // For inet_pton
+#pragma comment(lib, "Ws2_32.lib") // Link Winsock library for MSVC
+#else
+#include <sys/socket.h> // For Linux socket programming
+#include <netinet/in.h> // For internet address structures
+#include <arpa/inet.h>  // For inet_addr
+#include <unistd.h>     // For close()
+#endif
 
 // Function to turn MAC address (like "00:11:22:33:44:55") into bytes
 std::vector<unsigned char> parseMAC(const std::string& mac) {
@@ -71,6 +78,31 @@ std::vector<unsigned char> createMagicPacket(const std::vector<unsigned char>& m
 
 // Function to send the magic packet over the network
 bool sendPacket(const std::vector<unsigned char>& packet) {
+#ifdef _WIN32
+    // Initialize Winsock
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cout << "Error: Could not initialize Winsock" << std::endl;
+        return false;
+    }
+
+    // Create a UDP socket
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == INVALID_SOCKET) {
+        std::cout << "Error: Could not create socket, error code: " << WSAGetLastError() << std::endl;
+        WSACleanup();
+        return false;
+    }
+
+    // Allow the socket to send broadcast messages
+    BOOL broadcast = TRUE;
+    if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (char*)&broadcast, sizeof(broadcast)) == SOCKET_ERROR) {
+        std::cout << "Error: Could not set broadcast option, error code: " << WSAGetLastError() << std::endl;
+        closesocket(sock);
+        WSACleanup();
+        return false;
+    }
+#else
     // Create a UDP socket
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
@@ -85,24 +117,49 @@ bool sendPacket(const std::vector<unsigned char>& packet) {
         close(sock);
         return false;
     }
+#endif
 
     // Set up the destination (broadcast address: 255.255.255.255, port 9)
     struct sockaddr_in addr;
     std::memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(9); // Port 9 is common for WOL
+#ifdef _WIN32
+    if (inet_pton(AF_INET, "255.255.255.255", &addr.sin_addr) <= 0) {
+        std::cout << "Error: Invalid broadcast address" << std::endl;
+        closesocket(sock);
+        WSACleanup();
+        return false;
+    }
+#else
     addr.sin_addr.s_addr = inet_addr("255.255.255.255");
+#endif
 
     // Send the packet
+#ifdef _WIN32
+    int sent = sendto(sock, (const char*)packet.data(), packet.size(), 0, (struct sockaddr*)&addr, sizeof(addr));
+    if (sent == SOCKET_ERROR) {
+        std::cout << "Error: Failed to send packet, error code: " << WSAGetLastError() << std::endl;
+        closesocket(sock);
+        WSACleanup();
+        return false;
+    }
+#else
     ssize_t sent = sendto(sock, packet.data(), packet.size(), 0, (struct sockaddr*)&addr, sizeof(addr));
     if (sent < 0) {
         std::cout << "Error: Failed to send packet" << std::endl;
         close(sock);
         return false;
     }
+#endif
 
     // Clean up
+#ifdef _WIN32
+    closesocket(sock);
+    WSACleanup();
+#else
     close(sock);
+#endif
     return true;
 }
 
